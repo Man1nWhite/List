@@ -280,6 +280,32 @@ def sdt_text(run_el, placeholder, title="Поле для заполнения"):
     return parse_xml(xml)
 
 
+
+def split_multi_text_runs(root):
+    """python-docx превращает \n в <w:br/>, из-за чего в одном <w:r> оказывается
+    несколько <w:t>. Делим такие run'ы на отдельные, чтобы при замене на элементы
+    формы не терять части текста."""
+    for r in list(root.iter(qn('w:r'))):
+        kids = [k for k in r if k.tag in (qn('w:t'), qn('w:br'), qn('w:tab'))]
+        if len(kids) <= 1:
+            continue
+        parent = r.getparent()
+        if parent is None:
+            continue
+        idx = list(parent).index(r)
+        rPr = r.find(qn('w:rPr'))
+        new_runs = []
+        for k in kids:
+            nr = OxmlElement('w:r')
+            if rPr is not None:
+                nr.append(copy.deepcopy(rPr))
+            nr.append(copy.deepcopy(k))
+            new_runs.append(nr)
+        parent.remove(r)
+        for i, nr in enumerate(new_runs):
+            parent.insert(idx + i, nr)
+
+
 SPLIT_RE = re.compile(r'(☐|_{4,})')
 
 
@@ -535,9 +561,9 @@ def matrix_header_cell(cell, text, fill, color, size=7.5, bold=False, center=Tru
 
 
 def signals_table(doc):
-    """Исходная таблица сигналов: 10 шкафов × 9 типов, пятистрочная шапка."""
+    """Таблица сигналов: 9 шкафов × 9 типов, пятистрочная шапка."""
     widths = [2.4, 1.3, 2.2, 1.6, 1.6, 1.6, 1.6, 1.6, 1.6, 1.9]
-    n_cab = 10
+    n_cab = 9
     t = doc.add_table(rows=5 + n_cab, cols=10)
     t.alignment = WD_TABLE_ALIGNMENT.LEFT
     table_setup(t, widths, indent=0.0, cellmar=(0.08, 0.05, 0.08, 0.05))
@@ -578,11 +604,11 @@ def signals_table(doc):
 
 
 def interfaces_table(doc):
-    """Исходная таблица цифровых интерфейсов: 10 шкафов × 5 колонок."""
+    """Таблица цифровых интерфейсов: 9 шкафов × 5 колонок."""
     widths = [1.7, 2.6, 2.7, 3.3, 2.7, 4.5]
     header = ['', 'Ethernet', 'Profibus', 'Foundation Fieldbus', 'Modbus RTU (RS-485)',
               'Другое: ______________']
-    t = doc.add_table(rows=11, cols=6)
+    t = doc.add_table(rows=10, cols=6)
     t.alignment = WD_TABLE_ALIGNMENT.LEFT
     table_setup(t, widths, indent=0.0, cellmar=(0.10, 0.06, 0.10, 0.06))
     h = t.rows[0]
@@ -596,7 +622,7 @@ def interfaces_table(doc):
             set_run_font(c.paragraphs[0].add_run("Шкаф"), size=8.5, bold=True, color=WHITE)
         else:
             matrix_header_cell(c, txt, HDR_FILL, WHITE, size=8, bold=True)
-    for i in range(10):
+    for i in range(9):
         row = t.rows[1 + i]
         no_split(row); row_height(row, 0.62)
         cell = row.cells[0]
@@ -727,9 +753,6 @@ q_table(doc, [
 ])
 spacer(doc, 4)
 signals_table(doc)
-p = para(doc, size=9, italic=True, color=GREY, before=2, after=0, left=0.0, line=1.05)
-set_run_font(p.add_run("Если шкафов больше десяти, приложите перечень сигналов или укажите разбивку по шкафам "
-                       "отдельным файлом."), size=9, italic=True, color=GREY)
 spacer(doc, 4)
 q_table(doc, [
     ("4.3", [("q", "Цифровые интерфейсы по шкафам"),
@@ -740,24 +763,54 @@ interfaces_table(doc)
 
 # ---------- 5 ----------
 heading(doc, "5. Резервы для расширения")
-q_table(doc, [
-    ("5.1", [("q", "Какой резерв необходимо предусмотреть после завершения проекта?"),
-             ("sub", "Выберите один вариант в каждой строке.")]),
-])
-spacer(doc, 4)
-grid_table(doc, ["Параметр", "Требование"], [
-    ["Свободное место в шкафу, % полезной монтажной площади",
-     "☐ 10 %   ☐ 20 %   ☐ 30 %   ☐ другое: _____ %   ☐ предложить и согласовать"],
-    ["Свободные каналы ввода/вывода, % от установленного количества каналов каждого типа",
-     "☐ 10 %   ☐ 20 %   ☐ 30 %   ☐ другое: _____ %   ☐ предложить и согласовать"],
-], widths=[7.0, 9.25], indent=1.25, header_size=8.6, body_size=9.0, row_cm=0.75, center_from=9)
-spacer(doc, 4)
-q_table(doc, [
-    ("5.2", [("q", "Ограничения по габаритам шкафа:"),
-             ("opt", "☐  Нет ограничений"),
-             ("opt", "☐  Есть, место ограничено: Ш × В × Г не более _______________ мм"),
-             ("opt", "☐  Затрудняюсь ответить")]),
-])
+
+
+def reserve_table(doc):
+    widths = [1.25, 8.13, 8.13]
+    rows = [
+        ("5.1", "Резервное место в шкафу, % полезной монтажной площади",
+         "☐ 10 %   ☐ 20 %   ☐ 30 %   ☐ другое: _____ %\n☐ предложить и согласовать"),
+        ("5.2", "Свободные каналы ввода/вывода, % от установленного количества каналов каждого типа",
+         "☐ 10 %   ☐ 20 %   ☐ 30 %   ☐ другое: _____ %\n☐ предложить и согласовать"),
+        ("5.3", "Ограничения по габаритам шкафа:",
+         "☐  Нет ограничений\n☐  Есть, место ограничено: Ш × В × Г не более ____________ мм\n"
+         "☐  Затрудняюсь ответить"),
+    ]
+    t = doc.add_table(rows=len(rows) + 1, cols=3)
+    t.alignment = WD_TABLE_ALIGNMENT.LEFT
+    table_setup(t, widths, indent=0.0, cellmar=(0.16, 0.12, 0.16, 0.12))
+    hdr = t.rows[0]
+    header_row(hdr); no_split(hdr); row_height(hdr, 0.62)
+    for i, txt in enumerate(("№", "Вопрос", "Требование")):
+        c = hdr.cells[i]
+        shade(c, HDR_FILL); vcenter(c)
+        p = clear_cell(c)
+        if i == 0:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        set_run_font(p.add_run(txt), size=9.5, bold=True, color=RGBColor(0xFF, 0xFF, 0xFF))
+    for ri, (num, question, answer) in enumerate(rows, start=1):
+        row = t.rows[ri]
+        no_split(row)
+        band = ri % 2 == 0
+        for ci, cell in enumerate(row.cells):
+            vcenter(cell)
+            if band:
+                shade(cell, BAND_FILL)
+        pn = clear_cell(row.cells[0])
+        pn.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        set_run_font(pn.add_run(num), size=9.5, bold=True, color=NAVY)
+        pq = clear_cell(row.cells[1])
+        set_run_font(pq.add_run(question), size=10, color=TEXT)
+        pa = clear_cell(row.cells[2])
+        for k, line in enumerate(answer.split("\n")):
+            pp = pa if k == 0 else para(row.cells[2], size=9.5, after=1.5)
+            set_run_font(pp.add_run(line), size=9.5, color=SOFT)
+    # 5.3 — ответ занимает обе правые колонки
+    t.cell(3, 1).merge(t.cell(3, 2))
+    return t
+
+
+reserve_table(doc)
 
 # ---------- 6 ----------
 heading(doc, "6. Питание и условия эксплуатации")
@@ -785,7 +838,7 @@ q_table(doc, [
              ("opt", "от ______________ до ______________ °C"),
              ("opt", "☐  Затрудняюсь ответить")]),
     ("6.6", [("q", "Требуемая степень защиты:"),
-             ("opt", "☐  IP31        ☐  IP54        ☐  IP65        ☐  Другое: __________"),
+             ("opt", "☐  IP20        ☐  IP31        ☐  IP54        ☐  IP65        ☐  Другое: __________"),
              ("opt", "☐  Затрудняюсь ответить")]),
     ("6.7", [("q", "Требуется ли внутреннее освещение шкафа?"),
              ("opt", "☐  Да        ☐  Нет        ☐  Затрудняюсь ответить")]),
@@ -847,7 +900,7 @@ def build_footer(part):
     pbdr = el('w:pBdr')
     pbdr.append(el('w:top', **{'w:val': 'single', 'w:sz': '4', 'w:space': '4', 'w:color': 'C9D5E4'}))
     pPr.append(pbdr)
-    set_run_font(fp.add_run("Опросный лист на модернизацию систем автоматизации и диспетчеризации · версия 2.2"),
+    set_run_font(fp.add_run("Опросный лист на модернизацию систем автоматизации и диспетчеризации · версия 2.3"),
                  size=8, color=GREY)
     fp.add_run("\t")
     set_run_font(fp.add_run("стр. "), size=8, color=GREY)
@@ -861,6 +914,7 @@ build_footer(sec.even_page_footer)
 sec.different_first_page_header_footer = False
 
 # ---------- элементы формы ----------
+split_multi_text_runs(body)
 n_chk, n_txt = fieldify_paragraphs(body)
 
 normalize(doc.element.body)
@@ -871,8 +925,8 @@ for part in (sec.footer, sec.even_page_footer):
 
 cp = doc.core_properties
 cp.title = "Опросный лист на модернизацию систем автоматизации и диспетчеризации"
-cp.subject = "Опросный лист, версия 2.2 (заполняемая форма Word)"
-cp.comments = ("Редакция 2.2: сокращённое вступление, уточнённые вопросы по управлению и обмену данными, "
+cp.subject = "Опросный лист, версия 2.3 (заполняемая форма Word)"
+cp.comments = ("Редакция 2.3: сокращённое вступление, уточнённые вопросы по управлению и обмену данными, "
                "исходная таблица сигналов, резервы без дополнительных опций.")
 cp.revision = 4
 
